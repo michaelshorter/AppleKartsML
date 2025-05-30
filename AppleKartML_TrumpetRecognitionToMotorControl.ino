@@ -1,4 +1,8 @@
-//This code is designed for an Arduino Nano BLE Sense and DollaTek  Dual Channel L298N PWM motor controller. One note turns both motors clockwise, another both motors counterclockwise, another just one motor and the final not the other motor
+/*
+This code is designed for an Arduino Nano BLE Sense and DollaTek  Dual Channel L298N PWM motor controller. 
+One note turns both motors clockwise, another both motors counterclockwise, 
+another just one motor and the final not the other motor
+*/
 
 #define EIDSP_QUANTIZE_FILTERBANK   0
 #define EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW 4
