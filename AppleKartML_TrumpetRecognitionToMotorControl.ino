@@ -35,7 +35,7 @@ static bool debug_nn = false;
 void setup()
 {
     Serial.begin(115200);
-    while (!Serial); // Wait for Serial Monitor
+    while (!Serial && millis() < 3000); // Wait max 3s for serial
 
     Serial.println("Edge Impulse ML Motor Control Starting...");
 
@@ -241,3 +241,4 @@ static void microphone_inference_end(void)
 #if !defined(EI_CLASSIFIER_SENSOR) || EI_CLASSIFIER_SENSOR != EI_CLASSIFIER_SENSOR_MICROPHONE
 #error "Invalid model for current sensor."
 #endif
+
