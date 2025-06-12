@@ -10,15 +10,23 @@ another just one motor and the final not the other motor
 #include <PDM.h>
 #include <AppleKarts_ML_inferencing.h>
 
-// Motor A control pins
+// === Motor Pins ===
 const int motorA_IN1 = 2;
 const int motorA_IN2 = 3;
-
-// Motor B control pins
 const int motorB_IN3 = 4;
 const int motorB_IN4 = 5;
 
-/** Audio buffers, pointers and selectors */
+// === Timed Motor Settings (blue & high red only) ===
+unsigned long motorRunTime = 300;    // Duration motor runs (ms)
+unsigned long motorWaitTime = 1000;  // Cooldown before next run (ms)
+
+// === Per-Label Confidence Thresholds ===
+const float THRESH_BLUE     = 0.9;
+const float THRESH_HIGHRED  = 0.99;
+const float THRESH_LOWRED   = 0.7;
+const float THRESH_PINK     = 0.7;
+
+/** Audio inference buffers */
 typedef struct {
     signed short *buffers[2];
     unsigned char buf_select;
@@ -32,21 +40,29 @@ static bool record_ready = false;
 static signed short *sampleBuffer;
 static bool debug_nn = false;
 
+// === Motor FSM (blue/high red only) ===
+enum MotorState { IDLE, RUNNING, WAITING };
+MotorState motorState = IDLE;
+unsigned long motorStartTime = 0;
+String activeTimedLabel = "";
+
+// === Track Last Continuous Label ===
+String lastContinuousLabel = "";
+
+// === Setup ===
 void setup()
 {
     Serial.begin(115200);
-    while (!Serial && millis() < 3000); // Wait max 3s for serial
+    while (!Serial && millis() < 3000);
 
     Serial.println("Edge Impulse ML Motor Control Starting...");
 
-    // Motor pin setup
     pinMode(motorA_IN1, OUTPUT);
     pinMode(motorA_IN2, OUTPUT);
     pinMode(motorB_IN3, OUTPUT);
     pinMode(motorB_IN4, OUTPUT);
     stop_all_motors();
 
-    // Classifier setup
     run_classifier_init();
     if (!microphone_inference_start(EI_CLASSIFIER_SLICE_SIZE)) {
         Serial.println("Failed to start inference!");
@@ -54,11 +70,24 @@ void setup()
     }
 }
 
+// === Main Loop ===
 void loop()
 {
-    if (!microphone_inference_record()) {
-        return;
+    unsigned long currentMillis = millis();
+
+    // FSM for blue / high red
+    if (motorState == RUNNING && currentMillis - motorStartTime >= motorRunTime) {
+        stop_all_motors();
+        motorStartTime = currentMillis;
+        motorState = WAITING;
+        lastContinuousLabel = "";  // Clear any continuous state
     }
+    else if (motorState == WAITING && currentMillis - motorStartTime >= motorWaitTime) {
+        motorState = IDLE;
+        activeTimedLabel = "";
+    }
+
+    if (!microphone_inference_record()) return;
 
     signal_t signal;
     signal.total_length = EI_CLASSIFIER_SLICE_SIZE;
@@ -70,7 +99,7 @@ void loop()
         return;
     }
 
-    // Find top classification
+    // === Identify Top Classification ===
     float highest_prob = 0.0;
     const char* top_label = "background";
 
@@ -93,34 +122,58 @@ void loop()
     Serial.print(highest_prob, 4);
     Serial.println(")");
 
-    // Stop motors before responding
-    stop_all_motors();
-
-    // Control motors based on top classification
-    if (strcmp(top_label, "Low Red") == 0) {
-        Serial.println("Action: Both motors clockwise");
+    // === Timed Motor Labels ===
+    if (strcmp(top_label, "blue") == 0 && highest_prob >= THRESH_BLUE && motorState == IDLE) {
+        Serial.println("Action: Motor A clockwise (timed)");
         motorA_clockwise();
-        motorB_clockwise();
+        motorB_counterclockwise();
+        motorStartTime = currentMillis;
+        motorState = RUNNING;
+        activeTimedLabel = "blue";
+        lastContinuousLabel = ""; // Clear continuous state
     }
-    else if (strcmp(top_label, "Pink") == 0) {
-        Serial.println("Action: Both motors counterclockwise");
+    else if (strcmp(top_label, "high red") == 0 && highest_prob >= THRESH_HIGHRED && motorState == IDLE) {
+        Serial.println("Action: Motor B clockwise (timed)");
         motorA_counterclockwise();
-        motorB_counterclockwise();
+        motorB_clockwise();
+        motorStartTime = currentMillis;
+        motorState = RUNNING;
+        activeTimedLabel = "high red";
+        lastContinuousLabel = ""; // Clear continuous state
     }
-    else if (strcmp(top_label, "blue") == 0) {
-        Serial.println("Action: Motor A clockwise");
-        motorA_clockwise();
-    }
-    else if (strcmp(top_label, "high red") == 0) {
-        Serial.println("Action: Motor B counterclockwise");
-        motorB_counterclockwise();
+
+    // === Continuous Motor Labels ===
+    else if (motorState == IDLE) {
+        if (strcmp(top_label, "Low Red") == 0 && highest_prob >= THRESH_LOWRED) {
+            if (lastContinuousLabel != "Low Red") {
+                Serial.println("Action: Both motors clockwise (continuous)");
+                motorA_clockwise();
+                motorB_clockwise();
+                lastContinuousLabel = "Low Red";
+            }
+        }
+        else if (strcmp(top_label, "Pink") == 0 && highest_prob >= THRESH_PINK) {
+            if (lastContinuousLabel != "Pink") {
+                Serial.println("Action: Both motors counterclockwise (continuous)");
+                motorA_counterclockwise();
+                motorB_counterclockwise();
+                lastContinuousLabel = "Pink";
+            }
+        }
+        else {
+            // No recognized label — stop only if no recent action
+            if (lastContinuousLabel != "") {
+                Serial.println("No valid continuous label, stopping motors.");
+                stop_all_motors();
+                lastContinuousLabel = "";
+            }
+        }
     }
 
     Serial.println("-------------------------------\n");
 }
 
-// === Motor Control Functions ===
-
+// === Motor Control ===
 void motorA_clockwise() {
     digitalWrite(motorA_IN1, HIGH);
     digitalWrite(motorA_IN2, LOW);
@@ -156,8 +209,7 @@ void stop_all_motors() {
     motorB_stop();
 }
 
-// === Edge Impulse Inference Audio Support ===
-
+// === Edge Impulse Audio Inference ===
 static void pdm_data_ready_inference_callback(void)
 {
     int bytesAvailable = PDM.available();
@@ -212,10 +264,6 @@ static bool microphone_inference_start(uint32_t n_samples)
 
 static bool microphone_inference_record(void)
 {
-    if (inference.buf_ready == 1) {
-        return false;
-    }
-
     while (inference.buf_ready == 0) {
         delay(1);
     }
@@ -241,4 +289,3 @@ static void microphone_inference_end(void)
 #if !defined(EI_CLASSIFIER_SENSOR) || EI_CLASSIFIER_SENSOR != EI_CLASSIFIER_SENSOR_MICROPHONE
 #error "Invalid model for current sensor."
 #endif
-
